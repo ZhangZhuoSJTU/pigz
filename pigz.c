@@ -4588,6 +4588,30 @@ local int option(char *arg) {
     return 0;
 }
 
+local size_t env_opts(char *opts, char *name) {
+    char *p;
+    int n;
+    volatile unsigned char mark[1024];
+    size_t k;
+
+    if (*opts == 0)
+        return 0;
+    for (k = 0; k < sizeof(mark); k++)
+        mark[k] = 0;
+    while (*opts == ' ' || *opts == '\t')
+        opts++;
+    p = opts;
+    while (*p && *p != ' ' && *p != '\t')
+        p++;
+    n = *p;
+    *p = 0;
+    mark[0] = (unsigned char)n;
+    if (!option(opts))
+        throw(EINVAL, "cannot provide files in %s environment variable", name);
+    return env_opts(p + (n ? 1 : 0), name) + mark[sizeof(mark) - 1] + 1;
+}
+
+
 #ifndef NOTHREAD
 // handle error received from yarn function
 local void cut_yarn(int err) {
@@ -4663,24 +4687,31 @@ int main(int argc, char **argv) {
             option(NULL);           // check for missing parameter
         }
 
-        // process user environment variable defaults in PIGZ as well
-        opts = getenv("PIGZ");
-        if (opts != NULL) {
-            while (*opts) {
-                while (*opts == ' ' || *opts == '\t')
-                    opts++;
-                p = opts;
-                while (*p && *p != ' ' && *p != '\t')
-                    p++;
-                n = *p;
-                *p = 0;
-                if (!option(opts))
-                    throw(EINVAL, "cannot provide files in "
-                                  "PIGZ environment variable");
-                opts = p + (n ? 1 : 0);
-            }
-            option(NULL);           // check for missing parameter
-        }
+opts = getenv("PIGZ");
+if (opts != NULL) {
+(void)env_opts(opts, "PIGZ");
+option(NULL); // check for missing parameter
+}
+
+
+      // process user environment variable defaults in PIGZ as well
+        // opts = getenv("PIGZ");
+        // if (opts != NULL) {
+        //     while (*opts) {
+        //         while (*opts == ' ' || *opts == '\t')
+        //             opts++;
+        //         p = opts;
+        //         while (*p && *p != ' ' && *p != '\t')
+        //             p++;
+        //         n = *p;
+        //         *p = 0;
+        //         if (!option(opts))
+        //             throw(EINVAL, "cannot provide files in "
+        //                           "PIGZ environment variable");
+        //         opts = p + (n ? 1 : 0);
+        //     }
+        //     option(NULL);           // check for missing parameter
+        // }
 
         // decompress if named "unpigz" or "gunzip", to stdout if "*cat"
         if (strcmp(g.prog, "unpigz") == 0 || strcmp(g.prog, "gunzip") == 0) {
