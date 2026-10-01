@@ -1110,6 +1110,11 @@ local unsigned put(int out, ...) {
 // Low 32-bits set to all ones.
 #define LOW32 0xffffffff
 
+// Return the file name for zip/gzip headers, using the alias for stdin.
+local inline const char *zip_name(void) {
+    return g.name != NULL ? g.name : g.alias;
+}
+
 // Write a gzip, zlib, or zip header using the information in the globals.
 local length_t put_header(void) {
     length_t len;
@@ -1128,13 +1133,12 @@ local length_t put_header(void) {
             4, (val_t)0,            // crc (not here)
             4, (val_t)LOW32,        // compressed length (not here)
             4, (val_t)LOW32,        // uncompressed length (not here)
-            2, (val_t)(strlen(g.name == NULL ? g.alias : g.name)),  // name len
+            2, (val_t)(strlen(zip_name())),    // name len
             2, (val_t)29,           // length of extra field (see below)
             0);
 
-        // write file name (use g.alias for stdin)
-        len += writen(g.outd, g.name == NULL ? g.alias : g.name,
-                      strlen(g.name == NULL ? g.alias : g.name));
+        // write file name (use alias for stdin)
+        len += writen(g.outd, zip_name(), strlen(zip_name()));
 
         // write Zip64 and extended timestamp extra field blocks (29 bytes)
         len += put(g.outd,
@@ -1210,7 +1214,7 @@ local void put_trailer(length_t ulen, length_t clen,
             4, (val_t)check,        // crc
             4, (val_t)(zip64 ? LOW32 : clen),   // compressed length
             4, (val_t)(zip64 ? LOW32 : ulen),   // uncompressed length
-            2, (val_t)(strlen(g.name == NULL ? g.alias : g.name)),  // name len
+            2, (val_t)(strlen(zip_name())),    // name len
             2, (val_t)(zip64 ? 29 : 9), // extra field size (see below)
             2, (val_t)(g.comment == NULL ? 0 : strlen(g.comment)),  // comment
             2, (val_t)0,            // disk number 0
@@ -1219,9 +1223,8 @@ local void put_trailer(length_t ulen, length_t clen,
             4, (val_t)0,            // offset of local header
             0);
 
-        // write file name (use g.alias for stdin)
-        cent += writen(g.outd, g.name == NULL ? g.alias : g.name,
-                       strlen(g.name == NULL ? g.alias : g.name));
+        // write file name (use alias for stdin)
+        cent += writen(g.outd, zip_name(), strlen(zip_name()));
 
         // write Zip64 extra field block (20 bytes)
         if (zip64)
@@ -4366,19 +4369,50 @@ local void defaults(void) {
 
 // Long options conversion to short options.
 local char *longopts[][2] = {
-    {"LZW", "Z"}, {"lzw", "Z"}, {"alias", "A"}, {"ascii", "a"}, {"best", "9"},
-    {"bits", "Z"}, {"blocksize", "b"}, {"decompress", "d"}, {"fast", "1"},
-    {"force", "f"}, {"comment", "C"},
+    {"LZW", "Z"},
+    {"lzw", "Z"},
+    {"alias", "A"},
+    {"ascii", "a"},
+    {"best", "9"},
+    {"bits", "Z"},
+    {"blocksize", "b"},
+    {"comment", "C"},
+    {"decompress", "d"},
+    {"fast", "1"},
+    {"force", "f"},
 #ifndef NOZOPFLI
-    {"first", "F"}, {"iterations", "I"}, {"maxsplits", "J"}, {"oneblock", "O"},
+    {"first", "F"},
+    {"iterations", "I"},
+    {"maxsplits", "J"},
+    {"oneblock", "O"},
 #endif
-    {"help", "h"}, {"independent", "i"}, {"keep", "k"}, {"license", "L"},
-    {"list", "l"}, {"name", "N"}, {"no-name", "n"}, {"no-time", "m"},
-    {"processes", "p"}, {"quiet", "q"}, {"recursive", "r"}, {"rsyncable", "R"},
-    {"silent", "q"}, {"stdout", "c"}, {"suffix", "S"}, {"synchronous", "Y"},
-    {"test", "t"}, {"time", "M"}, {"to-stdout", "c"}, {"uncompress", "d"},
-    {"verbose", "v"}, {"version", "V"}, {"zip", "K"}, {"zlib", "z"},
-    {"huffman", "H"}, {"rle", "U"}};
+    {"help", "h"},
+    {"huffman", "H"},
+    {"independent", "i"},
+    {"keep", "k"},
+    {"license", "L"},
+    {"list", "l"},
+    {"name", "N"},
+    {"no-name", "n"},
+    {"no-time", "m"},
+    {"processes", "p"},
+    {"quiet", "q"},
+    {"recursive", "r"},
+    {"rle", "U"},
+    {"rsyncable", "R"},
+    {"silent", "q"},
+    {"stdout", "c"},
+    {"suffix", "S"},
+    {"synchronous", "Y"},
+    {"test", "t"},
+    {"time", "M"},
+    {"to-stdout", "c"},
+    {"uncompress", "d"},
+    {"verbose", "v"},
+    {"version", "V"},
+    {"zip", "K"},
+    {"zlib", "z"},
+};
 #define NLOPTS (sizeof(longopts) / (sizeof(char *) << 1))
 
 // Either new buffer size, new compression level, or new number of processes.
@@ -4588,6 +4622,39 @@ local int option(char *arg) {
     return 0;
 }
 
+// Parse whitespace-delimited options from an environment variable value.
+// Each token is processed with option(). Returns the number of options found.
+local size_t parse_env_opts(char *opts, const char *name) {
+    char *p;
+    int delim;
+    char ctx[4096];             // preserve unparsed tail for error context
+
+    // skip leading whitespace
+    while (*opts == ' ' || *opts == '\t')
+        opts++;
+    if (*opts == 0)
+        return 0;
+
+    // snapshot the remaining string before we start modifying it
+    strncpy(ctx, opts, sizeof(ctx) - 1);
+    ctx[sizeof(ctx) - 1] = '\0';
+
+    // isolate the current token
+    p = opts;
+    while (*p && *p != ' ' && *p != '\t')
+        p++;
+    delim = *p;
+    *p = 0;
+
+    if (!option(opts))
+        throw(EINVAL, "cannot provide files in %s environment variable"
+                      " (near: %.60s)", name, ctx);
+
+    // process remaining options
+    if (delim)
+        return 1 + parse_env_opts(p + 1, name);
+    return 1;
+}
 #ifndef NOTHREAD
 // handle error received from yarn function
 local void cut_yarn(int err) {
@@ -4647,38 +4714,14 @@ int main(int argc, char **argv) {
         // process user environment variable defaults in GZIP
         opts = getenv("GZIP");
         if (opts != NULL) {
-            while (*opts) {
-                while (*opts == ' ' || *opts == '\t')
-                    opts++;
-                p = opts;
-                while (*p && *p != ' ' && *p != '\t')
-                    p++;
-                n = *p;
-                *p = 0;
-                if (!option(opts))
-                    throw(EINVAL, "cannot provide files in "
-                                  "GZIP environment variable");
-                opts = p + (n ? 1 : 0);
-            }
+            parse_env_opts(opts, "GZIP");
             option(NULL);           // check for missing parameter
         }
 
         // process user environment variable defaults in PIGZ as well
         opts = getenv("PIGZ");
         if (opts != NULL) {
-            while (*opts) {
-                while (*opts == ' ' || *opts == '\t')
-                    opts++;
-                p = opts;
-                while (*p && *p != ' ' && *p != '\t')
-                    p++;
-                n = *p;
-                *p = 0;
-                if (!option(opts))
-                    throw(EINVAL, "cannot provide files in "
-                                  "PIGZ environment variable");
-                opts = p + (n ? 1 : 0);
-            }
+            parse_env_opts(opts, "PIGZ");
             option(NULL);           // check for missing parameter
         }
 
