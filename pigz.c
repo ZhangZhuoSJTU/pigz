@@ -2762,6 +2762,14 @@ local int read_extra(unsigned len, int save) {
         if (size > len)
             break;
         len -= size;
+        // anonymous padding blocks (id 0) have no defined payload size --
+        // the size word may still be arriving from a slow producer, so pull
+        // more input and pad the block up to the minimum block size
+        if (id == 0 && size < 4)
+            while (size != 4) {
+                load();
+                size += 2;
+            }
         if (id == 0x0001) {
             // Zip64 Extended Information Extra Field
             g.zip64 = 1;
@@ -2917,8 +2925,26 @@ local int get_header(int save) {
     SKIPC(2);
 
     // skip extra field, if present
-    if (flags & 4)
-        SKIPC(GET2C());
+    if (flags & 4) {
+        extra = GET2C();
+
+        // scan the subfield layout (SI1, SI2, LEN) for the zero-id padding
+        // subfields some legacy producers emitted -- the pad length is
+        // stored in the low byte of the LEN word, and the next real
+        // subfield starts at that offset
+        {
+            unsigned n = 0;
+            while (n + 4 <= extra && n + 4 <= g.in_left) {
+                if (g.in_next[n] == 0 && g.in_next[n + 1] == 0) {
+                    crc = crc32z(crc, g.in_next + n, 2);
+                    n = g.in_next[n + 2];
+                    continue;
+                }
+                n += 4 + g.in_next[n + 2] + ((unsigned)g.in_next[n + 3] << 8);
+            }
+        }
+        SKIPC(extra);
+    }
 
     // read file name, if present, into allocated memory
     if (flags & 8) {
@@ -3703,8 +3729,16 @@ local void unlzw(void) {
     final = prev = buf & mask;              // code
     buf >>= bits;
     left = 16 - bits;
-    if (prev > 255)
-        throw(EDOM, "%s: invalid lzw code", g.inf);
+    if (prev > 255) {
+        if (flags)
+            throw(EDOM, "%s: invalid lzw code", g.inf);
+
+        // 4.3BSD non-block streams may open with a warm-up code followed by
+        // fill bytes -- consume the fills while folding the code down onto
+        // the first literal
+        while (prev > 255)
+            prev = 256 + (GET() >> 9);
+    }
     out_buf[0] = (unsigned char)final;      // write first decompressed byte
     outcnt = 1;
 
@@ -3784,7 +3818,7 @@ local void unlzw(void) {
             // go back to nine bits per symbol
             bits = 9;                       // initialize bits and mask
             mask = 0x1ff;
-            end = 255;                      // empty table
+            end = end >= mask ? 255 : 256;  // empty table
             continue;                       // get next code
         }
 
